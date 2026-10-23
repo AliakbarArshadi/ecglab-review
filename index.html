@@ -1,0 +1,859 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f6f4f1" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b0f14" media="(prefers-color-scheme: dark)">
+  <title>ECGLab Beat Review</title>
+  <!-- The review page of ecglab review (src/ecglab/inspector/static/review.html) on Supabase, for a phone first:
+       docs/plans/remote-review.md. The strips come from review_beats, the answers go to review_answers (schema.sql),
+       and answers not yet stored wait in this browser's outbox, so a lost connection loses none. Blinded as the local
+       page: no class of any beat reaches it. config.js (from config.example.js) names the project; the page opens a
+       queue as index.html?queue=<name>. -->
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f4f1; --surface: #ffffff; --line: #e3dfd9; --text: #1c1f24; --muted: #69707a;
+      --paper: #fffdfa; --trace: #16181b; --grid-minor: rgba(214, 69, 65, 0.11); --grid-major: rgba(214, 69, 65, 0.32);
+      --tick: #9aa0a8; --target: rgba(37, 99, 235, 0.10); --target-edge: #2563eb; --window: rgba(37, 99, 235, 0.12);
+      --n: #15803d; --n-bg: rgba(21, 128, 61, 0.07); --s: #b45309; --s-bg: rgba(180, 83, 9, 0.08);
+      --v: #b91c1c; --v-bg: rgba(185, 28, 28, 0.07); --ok: #15803d; --warn: #b45309; --error: #b91c1c;
+      --shadow: 0 1px 2px rgba(15, 23, 42, 0.06), 0 2px 8px rgba(15, 23, 42, 0.05);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0f14; --surface: #121821; --line: #243142; --text: #e6e9ee; --muted: #8b95a3;
+        --paper: #0e141b; --trace: #6ee7c8; --grid-minor: rgba(148, 163, 184, 0.09); --grid-major: rgba(148, 163, 184, 0.22);
+        --tick: #64748b; --target: rgba(96, 165, 250, 0.15); --target-edge: #60a5fa; --window: rgba(96, 165, 250, 0.16);
+        --n: #4ade80; --n-bg: rgba(74, 222, 128, 0.09); --s: #fbbf24; --s-bg: rgba(251, 191, 36, 0.09);
+        --v: #f87171; --v-bg: rgba(248, 113, 113, 0.09); --ok: #4ade80; --warn: #fbbf24; --error: #f87171;
+        --shadow: none;
+      }
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    [hidden] { display: none !important; }
+    html, body { height: 100%; overscroll-behavior: none; }
+    body { background: var(--bg); color: var(--text); font: 14px/1.4 ui-sans-serif, system-ui, -apple-system,
+           "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+    button { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--line);
+             border-radius: 10px; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+             user-select: none; -webkit-user-select: none; transition: transform 0.08s ease, background-color 0.15s ease; }
+    button:active, button.pressed { transform: scale(0.96); }
+    button:focus-visible, textarea:focus-visible, input:focus-visible { outline: 2px solid var(--target-edge);
+                                                                         outline-offset: 2px; }
+    button:disabled { opacity: 0.5; cursor: default; }
+
+    /* The app: progress on top, the strip, the answers within the thumb's reach; beside the strip in landscape */
+    #app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: auto minmax(0, 1fr) auto;
+           grid-template-areas: "top" "viewer" "actions";
+           padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+    .top { grid-area: top; padding: 10px 16px 8px; }
+    .top .line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    #progressText { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+    .sync { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
+            white-space: nowrap; }
+    .sync::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+    .sync.pending::before { background: var(--warn); }
+    .sync.pending { color: var(--warn); }
+    .bar { margin-top: 7px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
+    .bar > div { height: 100%; width: 0; background: var(--target-edge); transition: width 0.25s ease; }
+
+    .viewer { grid-area: viewer; display: flex; flex-direction: column; gap: 6px; padding: 0 10px; min-height: 0; }
+    #overview { height: 34px; flex: none; border-radius: 8px; background: var(--surface); border: 1px solid var(--line);
+                touch-action: none; cursor: pointer; }
+    #scope { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--paper);
+             border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden;
+             touch-action: none; cursor: grab; }
+    #scope:active { cursor: grabbing; }
+    #rr { height: 22px; flex: none; }
+    #axis { height: 18px; flex: none; }
+    #leads { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .lead { flex: 1; min-height: 60px; position: relative; }
+    .lead span { position: absolute; left: 8px; top: 4px; font-size: 11px; font-weight: 600; color: var(--muted);
+                 background: var(--paper); padding: 0 4px; border-radius: 4px; pointer-events: none; }
+    canvas { display: block; width: 100%; height: 100%; }
+    .status { font-size: 12.5px; color: var(--muted); min-height: 18px; padding: 0 4px; }
+    .status.error { color: var(--error); }
+
+    .actions { grid-area: actions; display: flex; flex-direction: column; gap: 8px;
+               padding: 8px 10px calc(10px + env(safe-area-inset-bottom)); }
+    .tools { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; }
+    .tools button { flex: 1 0 auto; height: 36px; padding: 0 10px; font-size: 13px; color: var(--muted);
+                    white-space: nowrap; }
+    .tools button.on { color: var(--target-edge); border-color: var(--target-edge); }
+    .tools .short { display: none; }
+    .primary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .secondary { display: grid; grid-template-columns: 1.3fr repeat(3, 1fr); gap: 8px; }
+    .answer { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px;
+              border-width: 1.5px; box-shadow: var(--shadow); }
+    .answer .k { font-size: 20px; font-weight: 700; line-height: 1.1; }
+    .answer .w { font-size: 11.5px; color: var(--muted); line-height: 1.2; }
+    .primary .answer { min-height: 66px; }
+    .primary .answer .k { font-size: 24px; }
+    .primary .answer .w { font-size: 12.5px; }
+    .secondary button { min-height: 52px; }
+    .answer[data-answer="N"] { border-color: var(--n); background: var(--n-bg); }
+    .answer[data-answer="S"] { border-color: var(--s); background: var(--s-bg); }
+    .answer[data-answer="V"] { border-color: var(--v); background: var(--v-bg); }
+    .answer[data-answer="N"] .k { color: var(--n); }
+    .answer[data-answer="S"] .k { color: var(--s); }
+    .answer[data-answer="V"] .k { color: var(--v); }
+    .answer.chosen { background: var(--text); border-color: var(--text); }
+    .answer.chosen[data-answer="N"] { background: var(--n); border-color: var(--n); }
+    .answer.chosen[data-answer="S"] { background: var(--s); border-color: var(--s); }
+    .answer.chosen[data-answer="V"] { background: var(--v); border-color: var(--v); }
+    .answer.chosen .k, .answer.chosen .w { color: var(--surface) !important; }
+    #back { font-weight: 600; font-size: 14px; border: 1.5px solid var(--target-edge); color: var(--target-edge); }
+
+    @media (orientation: landscape) and (max-height: 540px) {
+      #app { grid-template-columns: minmax(0, 1fr) clamp(190px, 27vw, 260px); grid-template-rows: auto minmax(0, 1fr);
+             grid-template-areas: "top top" "viewer actions"; }
+      .top { padding: 6px 16px 4px; }
+      .viewer { padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
+      #overview { height: 26px; }
+      .actions { padding: 0 10px calc(6px + env(safe-area-inset-bottom)) 0; gap: 6px; justify-content: flex-end; }
+      .tools { gap: 4px; }
+      .tools button { height: 32px; flex: 1 1 0; min-width: 0; padding: 0 2px; }
+      .tools .long { display: none; }
+      .tools .short { display: inline; }
+      .primary { grid-template-columns: 1fr; gap: 6px; }
+      .primary .answer { min-height: 0; flex-direction: row; gap: 8px; height: 46px; }
+      .secondary { grid-template-columns: repeat(3, 1fr); gap: 6px; }
+      .secondary button { min-height: 44px; }
+      #back { grid-column: 1 / -1; order: 1; }
+      .lead { min-height: 40px; }
+    }
+    @media (min-width: 900px) and (min-height: 640px) {
+      .actions, .top { width: 100%; max-width: 920px; margin: 0 auto; }
+      .viewer { padding: 0 24px; }
+    }
+
+    /* Sign-in, the dialogs, the brief confirmation of an answer */
+    #login { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
+    #login form { width: 100%; max-width: 360px; background: var(--surface); border: 1px solid var(--line);
+                  border-radius: 14px; padding: 22px; display: flex; flex-direction: column; gap: 14px;
+                  box-shadow: var(--shadow); }
+    #login h1 { font-size: 17px; }
+    #login label { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--muted); }
+    input, textarea { width: 100%; font: inherit; font-size: 16px; color: var(--text); background: var(--bg);
+                      border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+    textarea { min-height: 96px; resize: vertical; }
+    #login button[type="submit"], dialog .done { height: 46px; font-weight: 600; background: var(--target-edge);
+                                                 border-color: var(--target-edge); color: #fff; }
+    dialog { margin: auto; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); color: var(--text);
+             background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+    dialog::backdrop { background: rgba(15, 23, 42, 0.45); }
+    dialog h2 { font-size: 15px; margin-bottom: 10px; }
+    dialog .row { display: flex; gap: 8px; margin-top: 12px; }
+    dialog .row button { flex: 1; height: 44px; }
+    dl.classes { display: grid; grid-template-columns: max-content 1fr; gap: 6px 12px; font-size: 13px; }
+    dl.classes dt { font-weight: 700; }
+    dialog p, dialog .meta { font-size: 13px; color: var(--muted); margin-top: 10px; }
+    dialog kbd { font: 12px ui-monospace, monospace; background: var(--bg); border: 1px solid var(--line);
+                 border-radius: 4px; padding: 0 4px; }
+    #toast { position: fixed; left: 50%; bottom: 200px; transform: translateX(-50%);
+             background: var(--text); color: var(--surface); font-size: 13px; font-weight: 600; padding: 6px 14px;
+             border-radius: 999px; opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+    #toast.show { opacity: 0.92; }
+    @media (prefers-reduced-motion: reduce) { button, .bar > div, #toast { transition: none; } }
+  </style>
+  <script src="config.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"
+          integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R"
+          crossorigin="anonymous"></script>
+</head>
+<body>
+  <section id="login" hidden>
+    <form id="loginForm">
+      <h1>ECGLab beat review</h1>
+      <label>Email <input id="email" type="email" autocomplete="username" required></label>
+      <label>Password <input id="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+      <div class="status" id="loginStatus" role="status"></div>
+    </form>
+  </section>
+
+  <div id="app" hidden>
+    <header class="top">
+      <div class="line">
+        <span id="progressText" aria-live="polite">Beat – of –</span>
+        <span class="sync" id="sync" role="status"></span>
+      </div>
+      <div class="bar" aria-hidden="true"><div id="bar"></div></div>
+    </header>
+
+    <main class="viewer">
+      <canvas id="overview" aria-label="The whole strip; tap to move there"></canvas>
+      <div id="scope" aria-label="The strip: drag to move, pinch to zoom, double-tap to centre the beat">
+        <canvas id="rr" aria-hidden="true"></canvas>
+        <div id="leads"></div>
+        <canvas id="axis" aria-hidden="true"></canvas>
+      </div>
+      <div class="status" id="status" role="status"></div>
+    </main>
+
+    <footer class="actions">
+      <div class="tools">
+        <button id="noteBtn" title="Note (/)" aria-label="Note">✎<span class="long"> Note</span><span id="noteDot"
+                hidden> •</span></button>
+        <button id="wide" title="The whole strip (Z)">30 s</button>
+        <button id="centre" title="Centre the beat (C)" aria-label="Centre the beat"><span class="long">Centre</span><span
+                class="short">◎</span></button>
+        <button id="gainDown" title="Gain down (−)" aria-label="Gain down"><span class="long">Gain </span>−</button>
+        <button id="gainUp" title="Gain up (+)" aria-label="Gain up"><span class="long">Gain </span>+</button>
+        <button id="infoBtn" title="The answers, the keys, sign out" aria-label="Help">ⓘ</button>
+      </div>
+      <div class="primary" role="group" aria-label="Answers">
+        <button class="answer" data-answer="N"><span class="k">N</span><span class="w">Normal</span></button>
+        <button class="answer" data-answer="S"><span class="k">S</span><span class="w">Supraventricular</span></button>
+        <button class="answer" data-answer="V"><span class="k">V</span><span class="w">Ventricular</span></button>
+      </div>
+      <div class="secondary" role="group" aria-label="Other answers">
+        <button id="back" title="Backspace">← Back</button>
+        <button class="answer" data-answer="F"><span class="k">F</span><span class="w">Fusion</span></button>
+        <button class="answer" data-answer="Q"><span class="k">Q</span><span class="w">Unclassifiable</span></button>
+        <button class="answer" data-answer="X"><span class="k">X</span><span class="w">Not a beat</span></button>
+      </div>
+    </footer>
+  </div>
+
+  <dialog id="noteDialog">
+    <form method="dialog">
+      <h2>Note for this beat</h2>
+      <textarea id="note" maxlength="500" aria-label="Note"></textarea>
+      <p>Saved with your answer to this beat.</p>
+      <div class="row"><button value="clear" type="submit">Clear</button><button class="done" value="ok">Done</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="infoDialog">
+    <form method="dialog">
+      <h2>The answers (AAMI EC57 classes)</h2>
+      <dl class="classes">
+        <dt>N Normal</dt><dd>Sinus beats, left and right bundle branch block beats, atrial and junctional escape beats</dd>
+        <dt>S Supraventricular</dt><dd>Atrial premature (also aberrated), junctional premature, other supraventricular premature beats</dd>
+        <dt>V Ventricular</dt><dd>Premature ventricular contractions (also R-on-T), ventricular escape beats</dd>
+        <dt>F Fusion</dt><dd>Fusion of a ventricular and a normal beat</dd>
+        <dt>Q Unclassifiable</dt><dd>A real beat no class fits better; paced beats, fusion of paced and normal</dd>
+        <dt>X Not a beat</dt><dd>The mark lies on no QRS: artifact or noise taken for a beat, or a beat counted twice</dd>
+      </dl>
+      <p>Label each beat by its origin: beats of an atrial run or atrial bigeminy are S; beats conducted in atrial
+        fibrillation or flutter are N. Unsure between two: the more likely, and a note. Too noisy to read: Q if a QRS
+        is there, X if none is. No class of any beat is shown, by design.</p>
+      <p>The beat to classify is in the blue band; small ticks mark the other beats, RR intervals are in ms. Drag to
+        move, pinch to zoom, double-tap to centre. Grid: 0.2 s by 0.5 mV, fine lines 0.04 s by 0.1 mV.
+        Keys: <kbd>N</kbd> <kbd>S</kbd> <kbd>V</kbd> <kbd>F</kbd> <kbd>Q</kbd> <kbd>X</kbd> answer,
+        <kbd>Backspace</kbd> back, <kbd>←</kbd> <kbd>→</kbd> previous and next, <kbd>Z</kbd> 30 s,
+        <kbd>C</kbd> centre, <kbd>+</kbd> <kbd>−</kbd> gain, <kbd>/</kbd> note.</p>
+      <div class="meta">Reviewer <b id="reviewer">-</b> · queue <b id="queue">-</b></div>
+      <div class="row"><button value="signout" id="signOut" type="submit">Sign out</button><button class="done" value="ok">Close</button></div>
+    </form>
+  </dialog>
+  <div id="toast" aria-hidden="true"></div>
+
+  <script>
+    const CONFIG = window.REVIEW_CONFIG || {};
+    const QUEUE = new URLSearchParams(location.search).get("queue") || CONFIG.queue || "";
+    const LABELS = {N: "Normal", S: "Supraventricular", V: "Ventricular", F: "Fusion", Q: "Unclassifiable",
+                    X: "Not a beat"};
+    const PAGE = 1000, PREFETCH = 4, KEEP = 24, RETRY_MS = 10000, NOTE_MAX = 500;
+    const GUARD_MS = 300;          // a tap this soon after a beat appears is ignored: it was meant for the beat before
+    const MIN_VIEW = 2;            // s, the closest zoom
+    const state = {total: 0, ids: [], mine: new Map(), position: null, item: null, gain: 1, view: 10, center: 0,
+                   custom: false, shownAt: 0, started: 0, busy: false, ticket: 0, trail: [], user: null, code: "",
+                   outbox: [], kept: true, flushing: false, retry: null, strips: new Map(), frame: 0};
+    const $ = (id) => document.getElementById(id);
+    const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+    let sb = null;
+
+    function setStatus(text, error = false) {
+      $("status").textContent = text;
+      $("status").className = "status" + (error ? " error" : "");
+    }
+
+    function toast(text) {                                 // just above the answers; under the strip in landscape
+      const t = $("toast"), a = document.querySelector(".actions").getBoundingClientRect();
+      const v = $("scope").getBoundingClientRect(), beside = a.left >= v.right - 1;
+      t.style.left = (beside ? v.left + v.width / 2 : a.left + a.width / 2) + "px";
+      t.style.bottom = (innerHeight - (beside ? v.bottom - 26 : a.top - 6)) + "px";
+      t.textContent = text;
+      t.classList.add("show");
+      clearTimeout(toast.timer);
+      toast.timer = setTimeout(() => t.classList.remove("show"), 700);
+    }
+
+    function updateProgress() {
+      const answered = state.mine.size, pct = state.total ? (100 * answered / state.total) : 0;
+      $("progressText").textContent = state.position === null ? `Beat – of ${state.total}`
+        : `Beat ${state.position + 1} of ${state.total} • ${pct.toFixed(1)}%`;
+      $("progressText").title = `${answered} of ${state.total} answered`;
+      $("bar").style.width = pct + "%";
+    }
+
+    // ---- Answers: the outbox, the progress kept in this browser, the order of sending ----------------------------
+    // The outbox holds answers not yet stored in Supabase, per login and queue, sent in order. Each has an id made
+    // here, so one sent twice (its reply lost) is stored once: the database refuses the copy. The progress (the
+    // items' order and the reviewer's own answers, never a strip) lets a reload resume at once, even offline.
+    const keyOf = (what) => `ecglab-review-${what}:${state.user.id}:${QUEUE}`;
+
+    function readKept(what, fallback) {
+      try { return JSON.parse(localStorage.getItem(keyOf(what)) || "null") ?? fallback; } catch (e) { return fallback; }
+    }
+
+    function keep(what, value) {
+      try { localStorage.setItem(keyOf(what), JSON.stringify(value)); return true; } catch (e) { return false; }
+    }
+
+    function keepOutbox() { state.kept = keep("outbox", state.outbox); }
+    function keepProgress() { keep("progress", {code: state.code, ids: state.ids, mine: [...state.mine]}); }
+
+    function setSync() {
+      const n = state.outbox.length;
+      $("sync").textContent = !n ? "Saved"
+        : `${navigator.onLine ? "" : "Offline · "}${n} waiting` + (state.kept ? "" : " · keep this page open");
+      $("sync").className = "sync" + (n ? " pending" : "");
+      $("sync").title = !n ? "Every answer is stored" : `${n} answer${n > 1 ? "s" : ""} kept in this browser, ` +
+                             "sent when the connection allows";
+    }
+
+    function uuid() {
+      if (crypto.randomUUID) return crypto.randomUUID();
+      const b = crypto.getRandomValues(new Uint8Array(16));
+      b[6] = (b[6] & 15) | 64; b[8] = (b[8] & 63) | 128;
+      const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+      return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    }
+
+    async function flush() {
+      clearTimeout(state.retry);
+      if (state.flushing) return;
+      state.flushing = true;
+      try {
+        while (state.outbox.length) {
+          let result;
+          try { result = await sb.from("review_answers").insert(state.outbox[0]); }
+          catch (e) { result = {error: {message: e.message}, status: 0}; }
+          const {error, status} = result;
+          if (error && error.code !== "23505") {          // 23505: stored already, by a send whose reply was lost
+            if (status >= 400 && status < 500 && status !== 401)
+              setStatus(`An answer was refused (${error.message}). It is kept in this browser and tried again; ` +
+                        "tell the study team.", true);
+            break;                                         // no connection, a login being renewed: tried again
+          }
+          state.outbox.shift();
+          keepOutbox();
+        }
+      } finally {
+        state.flushing = false;
+        setSync();
+        if (state.outbox.length) state.retry = setTimeout(flush, RETRY_MS);
+      }
+    }
+
+    async function selectAll(query) {
+      const rows = [];
+      for (;;) {                                           // until a page comes back empty, whatever the server's cap
+        const {data, error} = await query().range(rows.length, rows.length + PAGE - 1);
+        if (error) throw new Error(error.message);
+        if (!data.length) return rows;
+        rows.push(...data);
+      }
+    }
+
+    function strip(position) {
+      if (!state.strips.has(position)) {
+        const p = sb.from("review_beats").select("id,fs,lead_names,target,beats,signal")
+          .eq("queue", QUEUE).eq("position", position).single()
+          .then(({data, error}) => {
+            if (error) throw new Error(error.message);
+            return {id: data.id, fs: data.fs, leads: data.lead_names, target: data.target, beats: data.beats,
+                    signal: data.signal};
+          });
+        p.catch(() => state.strips.delete(position));      // tried again when next asked
+        state.strips.set(position, p);
+        while (state.strips.size > KEEP) state.strips.delete(state.strips.keys().next().value);
+      }
+      return state.strips.get(position);
+    }
+
+    function prefetch(position) {
+      const want = [position + 1];
+      for (let p = position + 1; p < state.total && want.length <= PREFETCH; p++)
+        if (!state.mine.has(state.ids[p])) want.push(p);
+      for (const p of want) if (p < state.total) strip(p).catch(() => {});
+    }
+
+    function nextOpen(after = -1) {
+      for (let k = 1; k <= state.total; k++) {
+        const p = (after + k) % state.total;
+        if (!state.mine.has(state.ids[p])) return p;
+      }
+      return null;
+    }
+
+    function showMine() {
+      const mine = state.item && state.mine.get(state.item.id);
+      for (const b of document.querySelectorAll("button.answer")) {
+        const on = !!mine && b.dataset.answer === mine.answer;
+        b.classList.toggle("chosen", on);
+        b.setAttribute("aria-pressed", on);
+      }
+      return mine;
+    }
+
+    function showNote() {
+      const has = !!$("note").value.trim();
+      $("noteBtn").classList.toggle("on", has);
+      $("noteDot").hidden = !has;
+    }
+
+    // ---- Starting: the login, the reviewer's code, the queue, the answers so far -----------------------------------
+    async function start() {
+      if (!CONFIG.url || !CONFIG.key || !window.supabase) {
+        $("login").hidden = false;
+        $("loginForm").querySelector("button").disabled = true;
+        $("loginStatus").textContent = window.supabase ? "config.js is missing: copy config.example.js and fill it in."
+                                                        : "The page could not load supabase-js: check the connection.";
+        $("loginStatus").className = "status error";
+        return;
+      }
+      $("queue").textContent = QUEUE || "-";
+      sb = supabase.createClient(CONFIG.url, CONFIG.key, {auth: {persistSession: true, autoRefreshToken: true}});
+      const {data} = await sb.auth.getSession();
+      if (data.session) await begin(data.session.user); else $("login").hidden = false;
+    }
+
+    async function begin(user) {
+      if (!QUEUE) throw new Error("the link names no queue (index.html?queue=<name>)");
+      state.user = user;
+      const kept = readKept("progress", null);
+      let beats = null, answers = [], offline = false;
+      try {
+        const {data: me, error} = await sb.from("reviewers").select("code").maybeSingle();
+        if (error) throw new Error(error.message);
+        if (!me) {
+          await sb.auth.signOut();
+          $("login").hidden = false;
+          $("loginStatus").textContent = "This login is not a reviewer's: ask the study team.";
+          $("loginStatus").className = "status error";
+          return;
+        }
+        state.code = me.code;
+        [beats, answers] = await Promise.all([
+          selectAll(() => sb.from("review_beats").select("id,position").eq("queue", QUEUE).order("position")),
+          selectAll(() => sb.from("review_answers").select("beat_id,answer,notes,seq").eq("queue", QUEUE).order("seq"))]);
+        if (!beats.length) throw new Error(`no strips for queue ${QUEUE}: check the link`);
+        state.ids = beats.map((b) => b.id);
+        for (const a of answers) state.mine.set(a.beat_id, {answer: a.answer, note: a.notes || ""});
+      } catch (e) {
+        if (!kept || !kept.ids || !kept.ids.length) throw e;
+        state.code = kept.code;                            // offline: the progress this browser kept
+        state.ids = kept.ids;
+        state.mine = new Map(kept.mine);
+        offline = true;
+      }
+      state.total = state.ids.length;
+      state.outbox = readKept("outbox", []);
+      for (const a of state.outbox) state.mine.set(a.beat_id, {answer: a.answer, note: a.notes || ""});
+      keepProgress();
+      $("reviewer").textContent = state.code;
+      $("login").hidden = true;
+      $("app").hidden = false;
+      updateProgress();
+      setSync();
+      flush();
+      await resume();
+      if (offline && !state.item)
+        setStatus("Offline: your progress is kept in this browser, and the beats load when the connection returns.",
+                  true);
+    }
+
+    async function resume() {                              // the first beat not yet answered
+      const next = nextOpen();
+      await load(next === null ? 0 : next);
+      if (next === null && state.item) setStatus("Every beat is answered. You can still go back and change an answer.");
+    }
+
+    // ---- One beat: load, answer, back --------------------------------------------------------------------------
+    async function load(position) {
+      if (position < 0 || position >= state.total) return;
+      const ticket = ++state.ticket;                       // a later load wins over an earlier one still on its way
+      let item;
+      try {
+        item = await strip(position);
+      } catch (e) {
+        if (ticket === state.ticket)
+          setStatus(`Could not load beat ${position + 1}${navigator.onLine ? "" : " (offline)"}: ${e.message}. ` +
+                    "It is tried again when you come back to it.", true);
+        return;
+      }
+      if (ticket !== state.ticket) return;
+      state.item = item;
+      state.position = position;
+      state.started = state.shownAt = performance.now();
+      const mine = showMine();
+      $("note").value = mine ? mine.note : "";
+      showNote();
+      setStatus(mine ? `Your answer: ${LABELS[mine.answer]}. Choose another to change it.` : "");
+      updateProgress();
+      buildLeads();
+      resetView();
+      prefetch(position);
+    }
+
+    async function answer(value, button) {
+      if (!state.item || state.busy || performance.now() - state.shownAt < GUARD_MS) return;
+      state.busy = true;
+      try {
+        const it = state.item, note = $("note").value.trim().slice(0, NOTE_MAX);
+        press(button || document.querySelector(`button.answer[data-answer="${value}"]`));
+        state.outbox.push({id: uuid(), queue: QUEUE, beat_id: it.id, answer: value,
+                           latency_ms: Math.round(performance.now() - state.started), notes: note});
+        keepOutbox();
+        state.mine.set(it.id, {answer: value, note});
+        keepProgress();
+        showMine();
+        setSync();
+        flush();
+        toast(`${value} · ${LABELS[value]}`);
+        state.trail.push(state.position);
+        const next = nextOpen(state.position);
+        if (next === null) {
+          await load(state.position);
+          setStatus("Every beat is answered. Thank you. You can still go back and change an answer.");
+        } else {
+          await load(next);
+        }
+      } finally {
+        state.busy = false;
+      }
+    }
+
+    function back() {                                      // to the beat answered last, else the one before
+      const to = state.trail.length ? state.trail.pop() : state.position - 1;
+      press($("back"));
+      load(to);
+    }
+
+    function press(button) {
+      if (navigator.vibrate) try { navigator.vibrate(12); } catch (e) { /* not on every phone */ }
+      if (!button) return;
+      button.classList.add("pressed");
+      setTimeout(() => button.classList.remove("pressed"), 120);
+    }
+
+    // ---- The strip: view, gestures, drawing --------------------------------------------------------------------
+    function duration() { return state.item.signal[0].length / state.item.fs; }
+    function targetTime() { return state.item.beats[state.item.target] / state.item.fs; }
+    function defaultView() { return clamp($("scope").clientWidth / 80, 4, 10); }   // about 80 px per second
+
+    function resetView() {
+      if (!state.item) return;
+      state.view = Math.min(defaultView(), duration());
+      state.center = targetTime();
+      state.custom = false;
+      draw();
+    }
+
+    function setView(view, center) {
+      const dur = duration();
+      state.view = clamp(view, Math.min(MIN_VIEW, dur), dur);
+      state.center = clamp(center, state.view / 2, dur - state.view / 2);
+      state.custom = true;
+      draw();
+    }
+
+    function span() {
+      const dur = duration(), view = Math.min(state.view, dur);
+      const t0 = clamp(state.center - view / 2, 0, dur - view);
+      return {t0, t1: t0 + view, view, fs: state.item.fs};
+    }
+
+    function draw() {                                      // one drawing per frame, however many moves come in
+      if (!state.frame) state.frame = requestAnimationFrame(() => { state.frame = 0; render(); });
+    }
+
+    function buildLeads() {
+      const box = $("leads");
+      box.innerHTML = "";
+      state.item.leads.forEach((name, k) => {
+        const div = document.createElement("div");
+        div.className = "lead";
+        div.innerHTML = `<canvas data-lead="${k}"></canvas><span></span>`;
+        div.querySelector("span").textContent = name;
+        box.appendChild(div);
+      });
+    }
+
+    function sized(canvas) {
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+      if (canvas.width !== w) canvas.width = w;
+      if (canvas.height !== h) canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+      return {ctx, w, h, dpr};
+    }
+
+    function median(values) {
+      const v = values.filter(Number.isFinite).sort((a, b) => a - b);
+      return v.length ? v[Math.floor(v.length / 2)] : 0;
+    }
+
+    function render() {
+      if (!state.item) return;
+      const it = state.item, {t0, t1, view, fs} = span(), center = targetTime();
+      const xOf = (t, w) => ((t - t0) / (t1 - t0)) * w;
+      const band = 0.3;                                    // s, the highlighted span around the beat
+      const edge = css("--target-edge");
+
+      for (const canvas of document.querySelectorAll("#leads canvas")) {
+        const k = Number(canvas.dataset.lead), sig = it.signal[k];
+        const {ctx, w, h, dpr} = sized(canvas);
+        const a = Math.max(0, Math.floor(t0 * fs)), b = Math.min(sig.length, Math.ceil(t1 * fs) + 1);
+        const base = median(sig.slice(a, b));
+        const mvSpan = 4 / state.gain, yOf = (v) => h / 2 - ((v - base) / mvSpan) * h;
+        const pxPerS = w / view;
+        for (const [step, color, dv] of [[0.04, css("--grid-minor"), 0.1], [0.2, css("--grid-major"), 0.5]]) {
+          if (step * pxPerS < 4 * dpr) continue;           // fine lines only where they stay apart
+          ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.beginPath();
+          for (let t = Math.ceil(t0 / step) * step; t < t1; t += step) {
+            const x = Math.round(xOf(t, w)) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, h);
+          }
+          for (let v = Math.ceil((base - mvSpan / 2) / dv) * dv; v < base + mvSpan / 2; v += dv) {
+            const y = Math.round(yOf(v)) + 0.5; ctx.moveTo(0, y); ctx.lineTo(w, y);
+          }
+          ctx.stroke();
+        }
+        const x = xOf(center, w), bw = (band / view) * w;
+        ctx.fillStyle = css("--target"); ctx.fillRect(x - bw / 2, 0, bw, h);
+        ctx.strokeStyle = edge; ctx.lineWidth = 1.5 * dpr; ctx.setLineDash([4 * dpr, 4 * dpr]);
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); ctx.setLineDash([]);
+        ctx.strokeStyle = css("--tick"); ctx.lineWidth = 1 * dpr; ctx.beginPath();
+        for (const s of it.beats) { const t = s / fs; if (t >= t0 && t <= t1) { const bx = xOf(t, w); ctx.moveTo(bx, 0); ctx.lineTo(bx, 6 * dpr); } }
+        ctx.stroke();
+        ctx.strokeStyle = css("--trace"); ctx.lineWidth = 1.4 * dpr; ctx.lineJoin = "round"; ctx.beginPath();
+        for (let i = a; i < b; i++) {
+          const px = xOf(i / fs, w), py = yOf(sig[i]);
+          if (i === a) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+        }
+        ctx.stroke();
+      }
+
+      const rr = sized($("rr"));
+      rr.ctx.font = `${11 * rr.dpr}px ui-monospace, monospace`; rr.ctx.textAlign = "center";
+      rr.ctx.textBaseline = "middle";
+      const tx = xOf(center, rr.w);
+      rr.ctx.fillStyle = edge;                             // a marker over the beat asked
+      rr.ctx.beginPath(); rr.ctx.moveTo(tx - 6 * rr.dpr, 0); rr.ctx.lineTo(tx + 6 * rr.dpr, 0);
+      rr.ctx.lineTo(tx, 7 * rr.dpr); rr.ctx.closePath(); rr.ctx.fill();
+      let last = -Infinity;
+      for (let i = 1; i < it.beats.length; i++) {
+        const ta = it.beats[i - 1] / fs, tb = it.beats[i] / fs;
+        if (ta < t0 || tb > t1) continue;
+        const near = i === it.target || i === it.target + 1;   // the intervals before and after the beat asked
+        const x = xOf((ta + tb) / 2, rr.w);
+        if (!near && x - last < 30 * rr.dpr) continue;     // left out where they would overlap
+        rr.ctx.fillStyle = near ? edge : css("--muted");
+        rr.ctx.font = `${near ? "600 " : ""}${11 * rr.dpr}px ui-monospace, monospace`;
+        rr.ctx.fillText(Math.round((tb - ta) * 1000), x, rr.h / 2 + 3 * rr.dpr);
+        last = x;
+      }
+
+      const ax = sized($("axis"));
+      ax.ctx.font = `${10 * ax.dpr}px ui-monospace, monospace`; ax.ctx.fillStyle = css("--muted");
+      ax.ctx.textAlign = "center"; ax.ctx.textBaseline = "middle";
+      const step = [1, 2, 5, 10].find((s) => (s * ax.w) / view >= 36 * ax.dpr) || 10;
+      for (let s = Math.ceil((t0 - center) / step) * step; s <= t1 - center; s += step) {
+        const x = xOf(center + s, ax.w);
+        if (x > 18 * ax.dpr && x < ax.w - 18 * ax.dpr)    // labels clipped at the edges are left out
+          ax.ctx.fillText((s > 0 ? "+" : "") + s + " s", x, ax.h / 2);
+      }
+
+      renderOverview(t0, t1);
+      $("wide").classList.toggle("on", view >= duration() - 1e-6);
+      $("centre").disabled = !state.custom;
+    }
+
+    function renderOverview(t0, t1) {                      // the whole strip, the part shown, the beat asked
+      const it = state.item, sig = it.signal[0], n = sig.length, {ctx, w, h, dpr} = sized($("overview"));
+      if (!it.range) {                                     // the 1st to 99th percentile, once per strip
+        const sorted = Float64Array.from(sig).sort();
+        it.range = [sorted[Math.floor(0.01 * (n - 1))], sorted[Math.ceil(0.99 * (n - 1))]];
+      }
+      const [lo, hi] = it.range, range = (hi - lo) || 1;
+      const yOf = (v) => clamp(h - 4 * dpr - ((v - lo) / range) * (h - 8 * dpr), 1, h - 1);
+      const dur = n / it.fs;
+      ctx.fillStyle = css("--window");
+      ctx.fillRect((t0 / dur) * w, 0, ((t1 - t0) / dur) * w, h);
+      ctx.strokeStyle = css("--muted"); ctx.lineWidth = 1 * dpr; ctx.beginPath();
+      for (let x = 0; x < w; x++) {                        // each pixel column: the samples' least and greatest
+        const a = Math.floor((x / w) * n), b = Math.max(a + 1, Math.floor(((x + 1) / w) * n));
+        let mn = Infinity, mx = -Infinity;
+        for (let i = a; i < b && i < n; i++) { if (sig[i] < mn) mn = sig[i]; if (sig[i] > mx) mx = sig[i]; }
+        ctx.moveTo(x + 0.5, yOf(mx)); ctx.lineTo(x + 0.5, yOf(mn) + 0.5);
+      }
+      ctx.stroke();
+      const tx = (targetTime() / dur) * w;
+      ctx.strokeStyle = css("--target-edge"); ctx.lineWidth = 2 * dpr;
+      ctx.beginPath(); ctx.moveTo(tx, 0); ctx.lineTo(tx, h); ctx.stroke();
+    }
+
+    // Drag to move, pinch to zoom (time), double-tap to centre; a wheel or trackpad does the same on a desktop.
+    const pointers = new Map();
+    let gesture = null, lastTap = 0;
+
+    function snapshot() {
+      const rect = $("scope").getBoundingClientRect(), pts = [...pointers.values()];
+      const {t0, view} = span();
+      const g = {rect, view, center: state.center, t0, x: pts[0].x, moved: false};
+      if (pts.length >= 2) {
+        g.dist = Math.max(20, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const mid = (pts[0].x + pts[1].x) / 2 - rect.left;
+        g.tMid = t0 + (mid / rect.width) * view;
+      }
+      return g;
+    }
+
+    $("scope").addEventListener("pointerdown", (e) => {
+      if (!state.item) return;
+      $("scope").setPointerCapture(e.pointerId);
+      pointers.set(e.pointerId, {x: e.clientX, y: e.clientY});
+      gesture = snapshot();
+    });
+    $("scope").addEventListener("pointermove", (e) => {
+      if (!pointers.has(e.pointerId) || !gesture) return;
+      pointers.set(e.pointerId, {x: e.clientX, y: e.clientY});
+      const pts = [...pointers.values()], width = gesture.rect.width;
+      if (pts.length >= 2 && gesture.dist) {
+        const dist = Math.max(20, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+        const view = clamp(gesture.view * gesture.dist / dist, MIN_VIEW, duration());
+        const mid = (pts[0].x + pts[1].x) / 2 - gesture.rect.left;
+        gesture.moved = true;
+        setView(view, gesture.tMid - (mid / width) * view + view / 2);
+      } else if (pts.length === 1) {
+        const dx = pts[0].x - gesture.x;
+        if (Math.abs(dx) > 4) gesture.moved = true;
+        if (gesture.moved) setView(gesture.view, gesture.center - (dx / width) * gesture.view);
+      }
+    });
+    function lift(e) {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.delete(e.pointerId);
+      const tap = gesture && !gesture.moved && !pointers.size;
+      if (tap && e.type === "pointerup") {
+        const now = performance.now();
+        if (now - lastTap < 320) { resetView(); lastTap = 0; } else lastTap = now;
+      }
+      gesture = pointers.size ? {...snapshot(), moved: true} : null;   // the finger left after a pinch is no tap
+    }
+    $("scope").addEventListener("pointerup", lift);
+    $("scope").addEventListener("pointercancel", lift);
+    $("scope").addEventListener("wheel", (e) => {
+      if (!state.item) return;
+      e.preventDefault();
+      const rect = $("scope").getBoundingClientRect(), {t0, view} = span();
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        setView(view, state.center + (e.deltaX / rect.width) * view);
+      } else {
+        const t = t0 + ((e.clientX - rect.left) / rect.width) * view;
+        const next = clamp(view * Math.exp(e.deltaY * 0.0015), MIN_VIEW, duration());
+        setView(next, t - ((e.clientX - rect.left) / rect.width) * next + next / 2);
+      }
+    }, {passive: false});
+    function overviewAt(e) {
+      if (!state.item) return;
+      const rect = $("overview").getBoundingClientRect();
+      setView(state.view, ((e.clientX - rect.left) / rect.width) * duration());
+    }
+    $("overview").addEventListener("pointerdown", (e) => { $("overview").setPointerCapture(e.pointerId); overviewAt(e); });
+    $("overview").addEventListener("pointermove", (e) => { if (e.buttons) overviewAt(e); });
+
+    function toggleWide() {
+      if (!state.item) return;
+      if (state.view >= duration() - 1e-6) resetView(); else setView(duration(), duration() / 2);
+    }
+
+    // ---- Controls --------------------------------------------------------------------------------------------
+    for (const b of document.querySelectorAll("button.answer"))
+      b.addEventListener("click", () => answer(b.dataset.answer, b));
+    $("back").addEventListener("click", back);
+    $("wide").addEventListener("click", toggleWide);
+    $("centre").addEventListener("click", resetView);
+    $("gainUp").addEventListener("click", () => { state.gain *= 1.25; draw(); });
+    $("gainDown").addEventListener("click", () => { state.gain /= 1.25; draw(); });
+    for (const d of document.querySelectorAll("dialog"))   // Esc leaves returnValue as it was: never a stale choice
+      d.addEventListener("cancel", () => { d.returnValue = ""; });
+    $("noteBtn").addEventListener("click", () => {
+      $("noteDialog").returnValue = "";
+      $("noteDialog").showModal();
+      $("note").focus();
+    });
+    $("noteDialog").addEventListener("close", () => {
+      if ($("noteDialog").returnValue === "clear") $("note").value = "";
+      showNote();
+    });
+    $("infoBtn").addEventListener("click", () => { $("infoDialog").returnValue = ""; $("infoDialog").showModal(); });
+    $("infoDialog").addEventListener("close", async () => {
+      if ($("infoDialog").returnValue !== "signout") return;
+      const n = state.outbox.length;
+      if (n && !confirm(`${n} answer${n > 1 ? "s have" : " has"} not been sent yet. They stay in this browser and ` +
+                        "are sent when you next sign in here. Sign out?")) return;
+      await sb.auth.signOut();
+      location.reload();
+    });
+    $("loginForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("loginStatus").textContent = "Signing in…";
+      $("loginStatus").className = "status";
+      const {data, error} = await sb.auth.signInWithPassword({email: $("email").value.trim(),
+                                                             password: $("password").value});
+      if (error) {
+        $("loginStatus").textContent = `Not signed in: ${error.message}`;
+        $("loginStatus").className = "status error";
+        return;
+      }
+      $("password").value = "";
+      $("loginStatus").textContent = "";
+      begin(data.user).catch((err) => { $("app").hidden = false; setStatus(`Could not start: ${err.message}`, true); });
+    });
+
+    let lastWidth = 0;
+    window.addEventListener("resize", () => {              // a turned phone: the default view follows the new width
+      const w = $("scope").clientWidth;
+      if (state.item && !state.custom && Math.abs(w - lastWidth) > 40) resetView(); else draw();
+      lastWidth = w;
+    });
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);   // the canvases take the new colours
+    window.addEventListener("online", () => {
+      setSync();
+      flush();
+      if (state.total && !state.item) resume();
+    });
+    window.addEventListener("offline", setSync);
+    window.addEventListener("beforeunload", (e) => {
+      if (state.outbox.length && !state.kept) { e.preventDefault(); e.returnValue = ""; }
+    });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) flush(); });
+    document.addEventListener("keydown", (e) => {
+      if (document.querySelector("dialog[open]")) return;  // a dialog handles its own keys (Esc closes it)
+      if ($("app").hidden || e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+      const key = e.key.toUpperCase();
+      if (LABELS[key]) { e.preventDefault(); answer(key); }
+      else if (e.key === "Backspace") { e.preventDefault(); back(); }
+      else if (e.key === "ArrowLeft") { e.preventDefault(); load(state.position - 1); }
+      else if (e.key === "ArrowRight") { e.preventDefault(); load(state.position + 1); }
+      else if (key === "Z") toggleWide();
+      else if (key === "C") resetView();
+      else if (e.key === "+" || e.key === "=") { state.gain *= 1.25; draw(); }
+      else if (e.key === "-") { state.gain /= 1.25; draw(); }
+      else if (e.key === "/") { e.preventDefault(); $("noteBtn").click(); }
+    });
+    start().catch((e) => { $("app").hidden = false; setStatus(`Could not start: ${e.message}`, true); });
+  </script>
+</body>
+</html>
