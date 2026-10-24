@@ -59,7 +59,8 @@
     .bar { margin-top: 7px; height: 3px; background: var(--line); border-radius: 2px; overflow: hidden; }
     .bar > div { height: 100%; width: 0; background: var(--target-edge); transition: width 0.25s ease; }
 
-    .viewer { grid-area: viewer; display: flex; flex-direction: column; gap: 6px; padding: 0 10px; min-height: 0; }
+    .viewer { grid-area: viewer; display: flex; flex-direction: column; gap: 6px; padding: 0 10px; min-height: 0;
+              overflow: hidden; }                          /* a short screen with the note open clips the strip */
     #overview { height: 34px; flex: none; border-radius: 8px; background: var(--surface); border: 1px solid var(--line);
                 touch-action: none; cursor: pointer; }
     #scope { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--paper);
@@ -106,13 +107,28 @@
     .answer.chosen .k, .answer.chosen .w { color: var(--surface) !important; }
     #back { font-weight: 600; font-size: 14px; border: 1.5px solid var(--target-edge); color: var(--target-edge); }
 
+    /* The note, under the answers: one quiet row until opened, so a beat without a note is still one tap */
+    .note { display: flex; flex-direction: column; gap: 6px; }
+    #noteBtn { height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 12px; font-size: 13px;
+               color: var(--muted); background: transparent; border-style: dashed; text-align: left; }
+    #noteBtn .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #noteBtn.on { color: var(--target-edge); border-color: var(--target-edge); border-style: solid; }
+    #noteBtn .chev { font-size: 11px; transition: transform 0.15s ease; }
+    #noteBtn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+    #note { min-height: 0; height: 64px; resize: none; padding: 8px 10px; }   /* 16 px: iOS does not zoom in */
+    .note .row { display: flex; align-items: center; gap: 8px; }
+    .note .count { flex: 1; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .note .row button { height: 34px; padding: 0 14px; font-size: 13px; }
+    #noteDone { font-weight: 600; color: var(--target-edge); border-color: var(--target-edge); }
+
     @media (orientation: landscape) and (max-height: 540px) {
       #app { grid-template-columns: minmax(0, 1fr) clamp(190px, 27vw, 260px); grid-template-rows: auto minmax(0, 1fr);
              grid-template-areas: "top top" "viewer actions"; }
       .top { padding: 6px 16px 4px; }
       .viewer { padding-bottom: calc(6px + env(safe-area-inset-bottom)); }
       #overview { height: 26px; }
-      .actions { padding: 0 10px calc(6px + env(safe-area-inset-bottom)) 0; gap: 6px; justify-content: flex-end; }
+      .actions { padding: 0 10px calc(6px + env(safe-area-inset-bottom)) 0; gap: 6px; }
+      .actions > :first-child { margin-top: auto; }       /* at the bottom, yet scrollable to the top when it overflows */
       .tools { gap: 4px; }
       .tools button { height: 32px; flex: 1 1 0; min-width: 0; padding: 0 2px; }
       .tools .long { display: none; }
@@ -123,6 +139,8 @@
       .secondary button { min-height: 44px; }
       #back { grid-column: 1 / -1; order: 1; }
       .lead { min-height: 40px; }
+      .actions { overflow-y: auto; }                       /* an open note scrolls the column, never the page */
+      #noteBtn, .note .row button { height: 32px; }
     }
     @media (min-width: 900px) and (min-height: 640px) {
       .actions, .top { width: 100%; max-width: 920px; margin: 0 auto; }
@@ -212,8 +230,6 @@
 
     <footer class="actions">
       <div class="tools">
-        <button id="noteBtn" title="Note (/)" aria-label="Note" aria-keyshortcuts="/">✎<span class="long"> Note</span><span
-                id="noteDot" hidden> •</span></button>
         <button id="wide" title="The whole strip (Z)" aria-keyshortcuts="Z">30 s</button>
         <button id="centre" title="Centre the beat (C)" aria-label="Centre the beat" aria-keyshortcuts="C"><span
                 class="long">Centre</span><span class="short">◎</span></button>
@@ -240,17 +256,19 @@
         <button class="answer" data-answer="X" aria-keyshortcuts="X"><span class="k">X</span><span
                 class="w">Not a beat</span></button>
       </div>
+      <div class="note">
+        <button id="noteBtn" aria-expanded="false" aria-controls="notePanel" aria-keyshortcuts="/"
+                title="An optional note on this beat, saved with its answer (/)"><span aria-hidden="true">✎</span><span
+                class="text" id="noteText">Add a note (optional)</span><span class="chev" aria-hidden="true">▾</span></button>
+        <div id="notePanel" hidden>
+          <textarea id="note" maxlength="500" aria-label="Note on this beat"
+                    placeholder="Saved with your answer to this beat"></textarea>
+          <div class="row"><span class="count" id="noteCount" aria-hidden="true"></span><button type="button"
+               id="noteClear">Clear</button><button type="button" id="noteDone">Done</button></div>
+        </div>
+      </div>
     </footer>
   </div>
-
-  <dialog id="noteDialog">
-    <form method="dialog">
-      <h2>Note for this beat</h2>
-      <textarea id="note" maxlength="500" aria-label="Note"></textarea>
-      <p>Saved with your answer to this beat.</p>
-      <div class="row"><button value="clear" type="submit">Clear</button><button class="done" value="ok">Done</button></div>
-    </form>
-  </dialog>
 
   <dialog id="infoDialog">
     <form method="dialog">
@@ -287,7 +305,8 @@
     const MIN_VIEW = 2;            // s, the closest zoom
     const state = {total: 0, ids: [], mine: new Map(), position: null, item: null, gain: 1, view: 10, center: 0,
                    custom: false, shownAt: 0, started: 0, busy: false, ticket: 0, trail: [], said: "", user: null, code: "",
-                   outbox: [], kept: true, flushing: false, retry: null, strips: new Map(), frame: 0};
+                   outbox: [], kept: true, flushing: false, retry: null, strips: new Map(), frame: 0,
+                   drafts: new Map()};
     const $ = (id) => document.getElementById(id);
     const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
     const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -428,10 +447,39 @@
       return mine;
     }
 
+    // ---- The note: saved with the answer tapped next; on a beat answered before, "Save with <its answer>" -----------
     function showNote() {
-      const has = !!$("note").value.trim();
-      $("noteBtn").classList.toggle("on", has);
-      $("noteDot").hidden = !has;
+      const text = $("note").value.trim(), open = !$("notePanel").hidden;
+      const mine = state.item && state.mine.get(state.item.id), changed = !!mine && text !== mine.note;
+      $("noteBtn").classList.toggle("on", !!text);
+      $("noteBtn").setAttribute("aria-expanded", open);
+      $("noteText").textContent = open ? "Note on this beat"
+        : !text ? (changed ? "Note cleared, not saved yet" : "Add a note (optional)")
+        : `${changed ? "Note, not saved yet" : "Note"}: ${text}`;
+      $("noteCount").textContent = `${$("note").value.length} / ${NOTE_MAX}`;
+      $("noteDone").textContent = changed ? `Save with ${mine.answer}` : "Done";
+      $("noteDone").dataset.save = changed ? mine.answer : "";
+    }
+
+    function openNote() {
+      $("notePanel").hidden = false;
+      showNote();
+      draw();                                              // the strip is shorter now
+      $("note").focus();
+    }
+
+    function closeNote() {
+      $("notePanel").hidden = true;
+      $("note").blur();
+      showNote();
+      draw();
+    }
+
+    function keepDraft() {                                 // a note typed and not saved stays with its beat
+      if (!state.item) return;
+      const mine = state.mine.get(state.item.id), text = $("note").value;
+      if (text.trim() !== (mine ? mine.note : "")) state.drafts.set(state.item.id, text);
+      else state.drafts.delete(state.item.id);
     }
 
     // ---- Starting: the login, the reviewer's code, the queue, the answers so far -----------------------------------
@@ -519,12 +567,15 @@
       }
       if (ticket !== state.ticket) return;
       const direction = state.position === null || position >= state.position ? "next" : "back";
+      keepDraft();
       state.item = item;
       state.position = position;
       state.started = state.shownAt = performance.now();
       settle(GUARD_MS);
       const mine = showMine();
-      $("note").value = mine ? mine.note : "";
+      $("note").value = state.drafts.has(item.id) ? state.drafts.get(item.id) : mine ? mine.note : "";
+      $("notePanel").hidden = true;                        // each beat starts with the note closed: one tap to answer
+      $("note").blur();
       showNote();
       setStatus(mine ? `Your answer: ${LABELS[mine.answer]}. Choose another to change it.` : "");
       updateProgress();
@@ -571,6 +622,7 @@
                            latency_ms: Math.round(performance.now() - state.started), notes: note});
         keepOutbox();
         state.mine.set(it.id, {answer: value, note});
+        state.drafts.delete(it.id);
         keepProgress();
         showMine();
         setSync();
@@ -846,14 +898,14 @@
     $("gainDown").addEventListener("click", () => { state.gain /= 1.25; draw(); });
     for (const d of document.querySelectorAll("dialog"))   // Esc leaves returnValue as it was: never a stale choice
       d.addEventListener("cancel", () => { d.returnValue = ""; });
-    $("noteBtn").addEventListener("click", () => {
-      $("noteDialog").returnValue = "";
-      $("noteDialog").showModal();
-      $("note").focus();
-    });
-    $("noteDialog").addEventListener("close", () => {
-      if ($("noteDialog").returnValue === "clear") $("note").value = "";
-      showNote();
+    $("noteBtn").addEventListener("click", () => ($("notePanel").hidden ? openNote() : closeNote()));
+    $("note").addEventListener("input", showNote);
+    $("note").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); closeNote(); } });
+    $("noteClear").addEventListener("click", () => { $("note").value = ""; showNote(); $("note").focus(); });
+    $("noteDone").addEventListener("click", () => {
+      const save = $("noteDone").dataset.save;
+      closeNote();
+      if (save) answer(save);                              // a beat answered before: its answer again, with the note
     });
     $("infoBtn").addEventListener("click", () => { $("infoDialog").returnValue = ""; $("infoDialog").showModal(); });
     $("infoDialog").addEventListener("close", async () => {
@@ -911,7 +963,7 @@
       else if (key === "C") resetView();
       else if (e.key === "+" || e.key === "=") { state.gain *= 1.25; draw(); }
       else if (e.key === "-") { state.gain /= 1.25; draw(); }
-      else if (e.key === "/") { e.preventDefault(); $("noteBtn").click(); }
+      else if (e.key === "/") { e.preventDefault(); openNote(); }
     });
     start().catch((e) => { $("app").hidden = false; setStatus(`Could not start: ${e.message}`, true); });
   </script>
